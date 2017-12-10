@@ -9,7 +9,7 @@
 #### RUN
 
 * ```npm run elevator```
-* ```npm run client```
+* ```npm run client``` - You can create multiple clients
 
 
 
