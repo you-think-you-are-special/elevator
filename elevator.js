@@ -23,7 +23,7 @@ class Elevator extends EventEmiter {
             delayBetweenFloors: 1000
         };
         this.queue = [];
-        this.areDoorsOpened = false;
+        this.priorityQueue = [];
     }
 
     async start() {
@@ -36,7 +36,7 @@ class Elevator extends EventEmiter {
         this.rl.prompt();
 
         this.log.info('\n\nStarting elevator');
-        await this.establishConnections();
+        this.repSocket.bindSync('tcp://127.0.0.1:3000');
         this.log.info('Connections are established');
         await this.askForSettings();
         this.startReplyClients();
@@ -46,21 +46,12 @@ class Elevator extends EventEmiter {
 
     async processQueueOfClients() {
         while (true) {
-            if (!this.queue.length) {
+            if (!this.priorityQueue.length && !this.queue.length) {
                 await this.waitQueue();
             }
-            const job = this.queue.pop();
+            const job = this.priorityQueue.length ? this.priorityQueue.pop() : this.queue.pop();
             await this.goToTheFloor(job.floor);
             await this.openDoors();
-
-            if (job.replyType === 'called_on_floor') {
-                this.repSocket.send('elevator_is_here');
-            }
-
-            if (job.replyType === 'called_in_elevator') {
-                this.repSocket.send('finish_trip');
-            }
-
             await this.waitForClient();
             await this.closeDoors();
         }
@@ -89,29 +80,27 @@ class Elevator extends EventEmiter {
 
     startReplyClients() {
         const actions = {
-            sync_settings: async () => {
-                this.log.info('Send settings to new client');
-                this.repSocket.send(`sync_settings#${JSON.stringify(this.settings)}`);
-            },
-
             call_elevator: async floor => {
+                this.repSocket.send('call_elevator_resp');
                 this.log.info(`Elevator called on ${floor} floor`);
                 this.queue.push({
                     replyType: 'called_on_floor',
                     floor: floor
                 });
                 this.emit('call_elevator');
+
             },
 
             choose_floor: async floor => {
-                this.queue.unshift({
+                this.repSocket.send('choose_floor_resp');
+                this.priorityQueue.push({
                     replyType: 'called_in_elevator',
                     floor: floor
                 });
             },
 
-            are_doors_opened: async () => {
-                this.repSocket.send(`are_doors_opened#${this.areDoorsOpened}`);
+            check_status: async () => {
+                this.repSocket.send(`check_status#${this.status}`);
             },
 
             defaults: async action => {
@@ -134,32 +123,49 @@ class Elevator extends EventEmiter {
     async goToTheFloor(floor) {
         const settings = this.settings;
         const isUp = settings.currentFloor < floor;
+
         let i;
         if (isUp) {
             for (i = settings.currentFloor + 1; i <= floor; i++) {
                 await utils.delay(settings.delayBetweenFloors);
+                //@todo encapsulate
                 settings.currentFloor = i;
                 this.log.info(`Current floor is ${i}`);
 
-                // const anotherClientsDirections = this.list[client.floor];
-                // if (!anotherClientsDirections && !anotherClientsDirections.includes(client.direction)) {
-                //     continue;
-                // }
-                //
-                // await this.openDoors();
-                // await Promise.all([
-                //     this.notifyClients(), //chooseFloor for each client
-                //     this.closeDoors()
-                // ]);
+                const inQueue = utils.inQueue(this.queue, settings.currentFloor);
+                const inPrioritizeQueue = utils.inQueue(this.priorityQueue, settings.currentFloor);
+
+                if (!inPrioritizeQueue && !inQueue) {
+                    continue;
+                }
+
+                utils.removeFromQueue(this.queue, settings.currentFloor);
+                utils.removeFromQueue(this.priorityQueue, settings.currentFloor);
+                await this.openDoors();
+                await this.waitForClient();
+                await this.closeDoors();
             }
             return
         }
 
         //if down
-        for (i = settings.currentFloor + 1; i >= floor; i--) {
+        for (i = settings.currentFloor; i >= floor; i--) {
             await utils.delay(settings.delayBetweenFloors);
             settings.currentFloor = i;
             this.log.info(`Current floor is ${i}`);
+
+            const inQueue = utils.inQueue(this.queue, settings.currentFloor);
+            const inPrioritizeQueue = utils.inQueue(this.priorityQueue, settings.currentFloor);
+
+            if (!inPrioritizeQueue && !inQueue) {
+                continue;
+            }
+
+            utils.removeFromQueue(this.queue, settings.currentFloor);
+            utils.removeFromQueue(this.priorityQueue, settings.currentFloor);
+            await this.openDoors();
+            await this.waitForClient();
+            await this.closeDoors();
         }
     }
 
@@ -171,22 +177,18 @@ class Elevator extends EventEmiter {
 
     async closeDoors() {
         this.log.info('Closing the doors');
-        this.areDoorsOpened = false;
+        this.status = 'doors_closing';
         await utils.delay(this.settings.msForCloseDoors);
+        this.status = 'doors_closed';
         this.log.info('Doors are closed');
     }
 
     async openDoors() {
         this.log.info('Opening the doors');
+        this.status = 'doors_opening';
         await utils.delay(this.settings.msForOpenDoors);
-        this.areDoorsOpened = true;
+        this.status = `doors_opened_on_${this.settings.currentFloor}`;
         this.log.info('Doors are opened');
-    }
-
-    async establishConnections() {
-        return utils.promiseCall(
-            this.repSocket, this.repSocket.bind, 'tcp://127.0.0.1:3000'
-        );
     }
 
     async waitQueue() {

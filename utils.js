@@ -26,3 +26,20 @@ module.exports.promiseCall = (context, fn, ...params) => {
         });
     });
 };
+
+module.exports.inQueue = (queue, floor) => {
+    for (let i = 0; i < queue.length; i++) {
+        if (queue[i].floor == floor) {
+            return true
+        }
+    }
+    return false
+};
+
+module.exports.removeFromQueue = (queue, floor) => {
+    for (let i = 0; i < queue.length; i++) {
+        if (queue[i].floor == floor) {
+            queue.splice(i, 1)
+        }
+    }
+};

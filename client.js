@@ -3,6 +3,7 @@ const zmq = require('zmq');
 const EventEmiter = require('events');
 const utils = require('./utils');
 
+
 //@todo validate input params by settings
 class Client extends EventEmiter {
     constructor() {
@@ -13,9 +14,9 @@ class Client extends EventEmiter {
 
     async start() {
         this.log.info('Starting new client');
-        await this.establishConnections();
+        this.reqSocket.connect('tcp://127.0.0.1:3000');
         this.log.info('Connections are established\n\n');
-        await this.startRequestElevator();
+        this.startRequestElevator();
 
         this.rl = readline.createInterface({
             input: process.stdin,
@@ -38,72 +39,51 @@ class Client extends EventEmiter {
     async callElevator() {
         this.elevatorCalledFloor = await this.question('Choose the floor where you are\n-> '); //@todo validate
         this.reqSocket.send(`call_elevator#${this.elevatorCalledFloor}`);
-
-        return new Promise(resolve => {
-            this.on('elevator_is_here', resolve)
-        });
+        return this.waitElevatorStatus(`doors_opened_on_${this.elevatorCalledFloor}`);
     }
 
-    async establishConnections() {
-        this.reqSocket.connect('tcp://127.0.0.1:3000');
-    }
-
-    async startRequestElevator() { //prepareElevatorMsgs mb
-        const actions = {
-            sync_settings: (settings) => {
-                this.settings = JSON.parse(settings);
-            },
-
-            defaults: (action, data) => {
-                this.emit(action, data)
+    async startRequestElevator() {
+        this.reqSocket.on('message', data => {
+            data = data.toString().split('#');
+            const eventName = data.shift();
+            if (eventName === 'check_status') {
+                this.emit('status', ...data);
             }
-        };
-
-        return new Promise(resolve => {
-            this.reqSocket.on('message', data => {
-                data = data.toString().split('#');
-                const action = data.shift();
-                if (actions[action]) {
-                    actions[action](...data);
-                    return resolve();
-                }
-
-                actions.defaults(action, data);
-                resolve()
-            });
-            this.reqSocket.send('sync_settings');
         });
+
+        while (true) {
+            this.reqSocket.send('check_status');
+            await utils.delay(1000) //@todo change
+        }
     }
 
     async goInside() {
+        let inside = false;
+        this.waitElevatorStatus('doors_closing')
+            .then(() => {
+                if (inside) {
+                    return
+                }
+                this.log.error('Doors already are closed\n');
+                this.log.error('Game over. You loose\n');
+                process.exit(0);
+            });
+
         const answ = await this.question('Elevator is here. Go inside? Yes/No\n-> ');
         if (answ.toLowerCase() === 'yes') {
-            const areDoorsOpened = await this.areDoorsOpened();
-            if (areDoorsOpened) {
-                return this.log.info('We are inside\n');
-            }
-            this.log.error('Doors already are closed\n');
+            inside = true;
+            return this.log.info('We are inside\n');
         }
 
         this.log.error('Game over. You loose\n');
         process.exit(0); //@todo need more code
     }
 
-    async areDoorsOpened() {
-        this.reqSocket.send('are_doors_opened');
-
-        return new Promise(resolve => {
-            this.on('are_doors_opened', ([are_doors_opened]) => resolve(are_doors_opened === 'true'))
-        })
-    }
-
     async chooseTheFloor() {
         const floor = await this.question('Choose the floor to go\n-> ');
         this.reqSocket.send(`choose_floor#${floor}`);
 
-        return new Promise(resolve => {
-            this.on('finish_trip', resolve)
-        });
+        return this.waitElevatorStatus(`doors_opened_on_${floor}`);
     }
 
     async goOutside() {
@@ -114,6 +94,14 @@ class Client extends EventEmiter {
 
         this.log.info('Game over. You loose \n');
         process.exit(0); //@todo need more code
+    }
+
+    async waitElevatorStatus(name) {
+        return new Promise(resolve => {
+            this.on('status', status => {
+                status === name && resolve()
+            })
+        })
     }
 }
 
